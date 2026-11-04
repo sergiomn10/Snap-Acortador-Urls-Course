@@ -6,9 +6,9 @@
 
 Acortador de URLs con analíticas, construido con **Node.js**, **Express 5**, **TypeScript** y **SQLite**.
 
-Snap recibe una URL larga, genera un código corto aleatorio y redirige a la URL original cuando alguien visita ese código. Los usuarios se registran, inician sesión con un JWT y gestionan sus propias URLs.
+Snap recibe una URL larga, genera un código corto aleatorio y redirige a la URL original cuando alguien visita ese código. Los usuarios se registran, inician sesión con un JWT, gestionan sus propias URLs y consultan un dashboard con los clicks que reciben.
 
-> **Estado:** en desarrollo. La autenticación, el acortado, el borrado, la redirección y el listado ya funcionan. Los módulos `dashboard` y `analytics` están planificados, pero todavía no tienen código.
+> **Estado:** en desarrollo. La autenticación, el acortado, el borrado, la redirección, el listado, el registro de clicks y el dashboard (totales y tendencias) ya funcionan. Los rankings del dashboard están pendientes.
 
 ---
 
@@ -37,6 +37,14 @@ Snap recibe una URL larga, genera un código corto aleatorio y redirige a la URL
 - **Validación de entrada:** solo se aceptan URLs `http` o `https` de hasta 2048 caracteres. Así se evita redirigir a `javascript:`, `data:`, `file:`, etc.
 - **Redirección 302:** la respuesta no queda cacheada en el navegador, de modo que cada visita llega al servidor. Esto es necesario para las analíticas.
 - **Propiedad:** cada URL pertenece a quien la crea, y solo esa persona puede borrarla.
+
+**Analíticas**
+
+- **Un click por visita:** cada `GET /:code` que redirige guarda la fecha, el visitante, el host del referer y el tipo de dispositivo. Las peticiones `HEAD` (verificadores de enlaces) no cuentan.
+- **Sin datos personales en claro:** la IP no se guarda. El visitante se identifica con un HMAC-SHA256 de la IP y el User-Agent, y del referer solo se guarda el host, nunca la ruta ni la query.
+- **Bots fuera de las estadísticas:** los crawlers y los generadores de vistas previas (WhatsApp, Slack, Telegram…) se guardan pero no cuentan en el dashboard.
+- **La redirección nunca falla por las analíticas:** si no se puede guardar un click, se escribe en el log y se redirige igualmente.
+- **Dashboard por usuario** con totales, comparación con el periodo anterior y serie diaria.
 
 **Autenticación**
 
@@ -68,7 +76,7 @@ npm run dev
 
 El servidor queda escuchando en `http://localhost:3000` y se reinicia al cambiar el código. La base de datos `snap.db` se crea automáticamente en el directorio actual.
 
-En desarrollo no hace falta configurar nada: `JWT_SECRET` usa un valor por defecto que **solo sirve para desarrollo**.
+En desarrollo no hace falta configurar nada: `JWT_SECRET` y `VISITOR_HASH_SECRET` usan valores por defecto que **solo sirven para desarrollo**.
 
 ### Scripts
 
@@ -87,15 +95,18 @@ En desarrollo no hace falta configurar nada: `JWT_SECRET` usa un valor por defec
 npm ci
 npm run build
 
-# Genera un secreto aleatorio, una sola vez, y guárdalo en tu gestor de secretos
+# Genera dos secretos aleatorios distintos, una sola vez, y guárdalos en tu gestor de secretos
 node -e "console.log(require('node:crypto').randomBytes(48).toString('base64'))"
 
 NODE_ENV=production \
 DB_NAME=/var/lib/snap/snap.db \
 JWT_SECRET='<secreto generado>' \
+VISITOR_HASH_SECRET='<otro secreto generado>' \
 PORT=8080 \
 npm start
 ```
+
+> Si Snap se despliega detrás de un proxy inverso (nginx, un balanceador…), `req.ip` será la IP del proxy y todos los visitantes contarán como uno. Hay que configurar [`trust proxy`](https://expressjs.com/en/guide/behind-proxies.html) en `app.ts` según el despliegue.
 
 ## Configuración
 
@@ -107,10 +118,13 @@ La configuración se lee de variables de entorno en [`src/config.ts`](src/config
 | `PORT` | `3000` | Puerto HTTP. Debe ser un entero entre 1 y 65535. |
 | `DB_NAME` | `snap.db` | Ruta del archivo SQLite. **Obligatoria en producción.** |
 | `JWT_SECRET` | Valor fijo de desarrollo | Clave para firmar los JWT. Mínimo 32 caracteres. **Obligatoria en producción.** |
+| `VISITOR_HASH_SECRET` | Valor fijo de desarrollo | Clave del HMAC que identifica a los visitantes sin guardar su IP. Mínimo 32 caracteres. **Obligatoria en producción.** |
 
 En `production`, los errores 500 no incluyen el mensaje interno. En `test`, el logger de peticiones está desactivado.
 
 > ⚠️ Si cambias `JWT_SECRET`, todos los tokens emitidos dejan de ser válidos y los usuarios tendrán que volver a iniciar sesión.
+>
+> ⚠️ Si cambias `VISITOR_HASH_SECRET`, los visitantes ya registrados no se reconocen: en los periodos que incluyan clicks de antes y de después del cambio, los visitantes únicos saldrán duplicados.
 
 ## Autenticación
 
@@ -139,6 +153,7 @@ El JWT está firmado con HS256 y contiene:
 | `POST /urls` | 🔒 Token |
 | `DELETE /urls/:code` | 🔒 Token, y solo el creador de la URL |
 | `GET /urls` | Público |
+| `GET /dashboard` | 🔒 Token. Solo incluye las URLs del usuario autenticado |
 | `GET /:code` | Público |
 | `GET /health` | Público |
 
@@ -248,11 +263,48 @@ Devuelve todas las URLs de todos los usuarios, de la más reciente a la más ant
 ]
 ```
 
+### `GET /dashboard`: vista general de mis URLs 🔒
+
+```bash
+curl http://localhost:3000/dashboard?days=30 \
+  -H "authorization: Bearer $TOKEN"
+```
+
+**200 OK**
+
+```json
+{
+  "period": { "days": 30, "from": "2026-10-06", "to": "2026-11-04", "timezone": "UTC" },
+  "totals": { "urls": 12, "clicks": 340, "urlsWithClicks": 9, "lastClickAt": "2026-11-04T07:30:11.336Z" },
+  "trend": { "clicks": 120, "previousClicks": 90, "changePct": 33.3, "uniqueVisitors": 80 },
+  "daily": [
+    { "date": "2026-10-06", "clicks": 0, "uniqueVisitors": 0 },
+    { "date": "2026-11-04", "clicks": 7, "uniqueVisitors": 5 }
+  ]
+}
+```
+
+| Campo | Contenido |
+|---|---|
+| `period` | Periodo consultado: los últimos `days` días, **hoy incluido**, en días UTC. `to` es el último día incluido. |
+| `totals` | Histórico completo, sin depender del periodo. `lastClickAt` es `null` si nunca hubo clicks. |
+| `trend.clicks` / `uniqueVisitors` | Clicks y visitantes únicos del periodo. |
+| `trend.previousClicks` | Clicks de los `days` días anteriores al periodo. |
+| `trend.changePct` | Variación respecto al periodo anterior, con un decimal. `null` si el periodo anterior no tuvo clicks. |
+| `daily` | Un elemento por día del periodo (siempre `days` elementos), con ceros en los días sin clicks. El ejemplo está recortado. |
+
+Los clicks de bots no cuentan en ningún campo. Un usuario sin URLs recibe todo a cero, no un `404`.
+
+| Status | Cuándo |
+|---|---|
+| `400` | `days` no es `7`, `30` ni `90`. Si no se envía, vale `30`. |
+| `401` | Sin token, o token inválido o expirado. |
+
 ### `GET /:code`: redirigir
 
 | Caso | Respuesta |
 |---|---|
-| El código existe | `302 Found` con `Location: <url original>` |
+| El código existe | `302 Found` con `Location: <url original>`. Si es un `GET`, registra un click. |
 | El código no existe | `404` `{ "error": "Not Found", "message": "El código abc1234 no existe" }` |
 
 ### `GET /health`: estado del servicio
@@ -295,8 +347,14 @@ src/
 │   ├── urls/
 │   │   ├── urls.repository.ts   # Acceso a datos y generación de códigos
 │   │   └── urls.routes.ts       # Validación HTTP, /urls y /:code
-│   ├── dashboard/               # (pendiente)
-│   └── analytics/               # (pendiente)
+│   ├── analytics/
+│   │   ├── click-info.ts        # Dispositivo, host del referer y hash del visitante
+│   │   ├── clicks.repository.ts # Inserción de clicks
+│   │   └── click-tracker.ts     # createClickTracker: registra la visita de una redirección
+│   └── dashboard/
+│       ├── dashboard.repository.ts # Las queries de agregación
+│       ├── dashboard.service.ts    # Periodos, relleno de días y variación porcentual
+│       └── dashboard.routes.ts     # Validación de ?days, /dashboard
 └── testing/
     └── listen.ts                # Utilidad para levantar la app en tests
 ```
@@ -312,12 +370,13 @@ src/
   - **Repositorio:** SQL. Ni las rutas ni los servicios acceden a la base de datos directamente.
 
   Un módulo sencillo como `urls` no necesita servicio: las rutas hablan directamente con el repositorio.
+- **El reloj también es una dependencia.** El tracker de clicks y el servicio del dashboard reciben `now()`, y `createApp({ db, now })` permite fijarlo en los tests.
 - **La autenticación es un middleware.** `createRequireAuth()` se aplica ruta a ruta. Las rutas protegidas leen el usuario con `getAuthUser(req)`, que lanza un error si la ruta no está protegida, para detectar ese olvido.
 
 ### Orden de la cadena de middlewares
 
 ```
-request-logger → express.json() → /health → /auth → /urls → /:code → notFoundHandler → errorHandler
+request-logger → express.json() → /health → /auth → /urls → /dashboard → /:code → notFoundHandler → errorHandler
 ```
 
 `GET /:code` captura cualquier ruta de un solo segmento, así que **cualquier router nuevo debe montarse antes que él**.
@@ -327,10 +386,14 @@ request-logger → express.json() → /health → /auth → /urls → /:code →
 SQLite mediante `node:sqlite` (`DatabaseSync`). Al abrir cada conexión, `createDatabase()`:
 
 1. activa las claves foráneas (`PRAGMA foreign_keys = ON`), que SQLite tiene desactivadas por defecto;
-2. crea las tablas que falten (`CREATE TABLE IF NOT EXISTS`);
-3. aplica las migraciones pendientes.
+2. activa el journal WAL con `synchronous = NORMAL` (ver abajo);
+3. crea las tablas e índices que falten (`CREATE TABLE IF NOT EXISTS`);
+4. aplica las migraciones pendientes;
+5. crea los triggers.
 
-Todas las fechas se guardan como texto ISO 8601 en UTC.
+Todas las fechas se guardan como texto ISO 8601 en UTC, siempre con el formato de `toISOString()`. Las queries comparan fechas como texto, y eso solo es correcto si todas tienen exactamente ese formato.
+
+**¿Por qué WAL?** Cada redirección escribe un click. Con el journal por defecto, cada `INSERT` hace un `fsync` (unos 3 ms, o sea, unos 300 clicks/s como máximo), y además lecturas y escrituras se bloquean entre sí. Con WAL baja a unos 0,06 ms. Como `node:sqlite` es síncrono, ese tiempo bloquea todo el servidor. La contrapartida de `synchronous = NORMAL` es que un corte de luz puede perder las últimas transacciones confirmadas, aunque la base no se corrompe. WAL crea junto a la base los archivos `-wal` y `-shm`, que forman parte de ella: hay que copiarlos en los backups o hacer un `VACUUM INTO`.
 
 ### `users`
 
@@ -360,11 +423,13 @@ URLs acortadas. Las usa el módulo `urls`.
 
 ```sql
 CREATE TABLE urls (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  code         TEXT    NOT NULL UNIQUE,
-  original_url TEXT    NOT NULL,
-  created_at   TEXT    NOT NULL,
-  user_id      INTEGER REFERENCES users(id)
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  code          TEXT    NOT NULL UNIQUE,
+  original_url  TEXT    NOT NULL,
+  created_at    TEXT    NOT NULL,
+  user_id       INTEGER REFERENCES users(id),
+  click_count   INTEGER NOT NULL DEFAULT 0,
+  last_click_at TEXT
 );
 
 CREATE INDEX urls_user_id ON urls (user_id);
@@ -377,6 +442,48 @@ CREATE INDEX urls_user_id ON urls (user_id);
 | `original_url` | URL de destino, ya validada y normalizada. |
 | `created_at` | Fecha de creación. |
 | `user_id` | Usuario que la creó. `NULL` en las URLs anteriores a la autenticación. |
+| `click_count` | Clicks recibidos, sin contar bots. Lo mantiene el trigger `clicks_count_url`. |
+| `last_click_at` | Fecha del click más reciente, sin contar bots. `NULL` si no hay ninguno. |
+
+`click_count` y `last_click_at` están desnormalizados a propósito: así los totales del dashboard leen una fila por URL en vez de recorrer todo el histórico de clicks. No se devuelven en `GET /urls`.
+
+### `clicks`
+
+Una fila por visita a `GET /:code`. La escribe el módulo `analytics` y la lee el módulo `dashboard`.
+
+```sql
+CREATE TABLE clicks (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  url_id     INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+  clicked_at TEXT    NOT NULL,
+  visitor    TEXT    NOT NULL,
+  referrer   TEXT,
+  device     TEXT    NOT NULL
+);
+
+CREATE INDEX clicks_url_time ON clicks (url_id, clicked_at, device, visitor);
+
+CREATE TRIGGER clicks_count_url AFTER INSERT ON clicks
+WHEN NEW.device <> 'bot'
+BEGIN
+  UPDATE urls
+  SET click_count = click_count + 1,
+      last_click_at = max(coalesce(last_click_at, ''), NEW.clicked_at)
+  WHERE id = NEW.url_id;
+END;
+```
+
+| Columna | Descripción |
+|---|---|
+| `url_id` | URL visitada. Al borrar la URL se borran sus clicks (`ON DELETE CASCADE`). |
+| `clicked_at` | Fecha de la visita. |
+| `visitor` | HMAC-SHA256 de la IP y el User-Agent con `VISITOR_HASH_SECRET`. Nunca la IP en claro. |
+| `referrer` | Solo el host del header `Referer`. `NULL` = acceso directo. |
+| `device` | `mobile`, `tablet`, `desktop` o `bot`, deducido del User-Agent. Sin User-Agent se considera `bot`. |
+
+`clicks_url_time` es un **índice cubriente**: incluye `device` y `visitor`, así que las queries del dashboard resuelven el filtro por URL y fecha y el `COUNT(DISTINCT visitor)` sin leer la tabla. Con 1 millón de clicks, la query de tendencia pasa de unos 1.200 ms a unos 75 ms.
+
+`referrer` y `device` se guardan ya, aunque el dashboard todavía no los muestre, para que los futuros rankings tengan datos desde el primer día.
 
 ### URLs sin dueño
 
@@ -389,6 +496,7 @@ Las URLs creadas antes de que existiera la autenticación tienen `user_id = NULL
 | Migración | Cambio |
 |---|---|
 | `urls.user_id` | Añade la columna y su índice a bases anteriores a la autenticación. Las filas existentes quedan con `NULL`. |
+| `urls.click_count`, `urls.last_click_at` | Añade los contadores a bases anteriores a las analíticas. Las filas existentes quedan a `0` y `NULL`. |
 
 Los archivos `*.db` están en `.gitignore`.
 
@@ -407,6 +515,7 @@ Detalles:
 
 - Cada suite usa su propia base en memoria, así que no hay estado compartido. La única excepción es el test de migraciones, que necesita un archivo real: lo crea en un directorio temporal y lo borra al terminar.
 - Los tests usan bcrypt con coste 4 (`createApp({ db, saltRounds: 4 })`) en lugar de 12. Así van rápidos sin cambiar el comportamiento.
+- `dashboard.test.ts` fija el reloj de la app (`createApp({ db, now: () => clock })`) y genera los clicks con redirecciones reales en fechas concretas, incluidos los bordes exactos de cada periodo.
 
 ## Convenciones
 

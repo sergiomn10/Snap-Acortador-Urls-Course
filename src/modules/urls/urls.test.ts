@@ -63,6 +63,13 @@ describe('módulo urls', () => {
     return (await (await shorten({ url }, session)).json()) as ShortUrlBody;
   }
 
+  function clicksOf(code: string): number {
+    const row = db
+      .prepare('SELECT COUNT(*) AS n FROM clicks c JOIN urls u ON u.id = c.url_id WHERE u.code = ?')
+      .get(code) as { n: number };
+    return row.n;
+  }
+
   function remove(code: string, session?: Session): Promise<Response> {
     return fetch(`${server.baseUrl}/urls/${code}`, {
       method: 'DELETE',
@@ -240,9 +247,23 @@ describe('módulo urls', () => {
       expect(res.headers.get('location')).toBe('https://example.com/destino');
     });
 
-    it('responde 404 si el código no existe', async () => {
+    it('registra un click por cada visita GET, pero no las HEAD', async () => {
+      const { code } = await createUrl('https://example.com/visitada');
+
+      await fetch(`${server.baseUrl}/${code}`, { redirect: 'manual' });
+      await fetch(`${server.baseUrl}/${code}`, { redirect: 'manual' });
+      const head = await fetch(`${server.baseUrl}/${code}`, { method: 'HEAD', redirect: 'manual' });
+
+      expect(head.status).toBe(302);
+      expect(clicksOf(code)).toBe(2);
+    });
+
+    it('responde 404 si el código no existe y no registra nada', async () => {
+      const before = (db.prepare('SELECT COUNT(*) AS n FROM clicks').get() as { n: number }).n;
+
       const res = await fetch(`${server.baseUrl}/noexiste`, { redirect: 'manual' });
 
+      expect((db.prepare('SELECT COUNT(*) AS n FROM clicks').get() as { n: number }).n).toBe(before);
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({
         error: 'Not Found',

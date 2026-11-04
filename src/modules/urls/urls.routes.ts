@@ -1,5 +1,6 @@
 import { Router, type RequestHandler } from 'express';
 import { getAuthUser } from '../../middleware/require-auth.ts';
+import type { TrackClick } from '../analytics/click-tracker.ts';
 import { UnknownUserError, type UrlsRepository } from './urls.repository.ts';
 
 const MAX_URL_LENGTH = 2048;
@@ -72,8 +73,8 @@ export function createUrlsRouter(repository: UrlsRepository, requireAuth: Reques
   return router;
 }
 
-/** Redirección pública, montada en la raíz: GET /:code. */
-export function createRedirectRouter(repository: UrlsRepository): Router {
+/** Redirección pública, montada en la raíz: GET /:code. Cada visita se registra con trackClick. */
+export function createRedirectRouter(repository: UrlsRepository, trackClick: TrackClick): Router {
   const router = Router();
 
   router.get('/:code', (req, res) => {
@@ -86,6 +87,7 @@ export function createRedirectRouter(repository: UrlsRepository): Router {
       return;
     }
 
+    trackClick(found.code, req);
     // 302 y no 301: el navegador no la cachea, así cada visita pasa por el servidor
     // (necesario para las analíticas).
     res.redirect(302, found.url);
