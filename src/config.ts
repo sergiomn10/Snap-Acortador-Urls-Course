@@ -5,6 +5,7 @@ export interface Config {
   readonly isProduction: boolean;
   readonly port: number;
   readonly dbName: string;
+  readonly jwtSecret: string;
 }
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -13,7 +14,13 @@ type Env = Readonly<Record<string, string | undefined>>;
 const NODE_ENVS: readonly NodeEnv[] = ['development', 'production', 'test'];
 
 // En producción no se aplican fallbacks para estas variables.
-const REQUIRED_IN_PRODUCTION = ['DB_NAME'] as const;
+const REQUIRED_IN_PRODUCTION = ['DB_NAME', 'JWT_SECRET'] as const;
+
+// HS256 necesita al menos 256 bits de clave para no ser atacable por fuerza bruta.
+const MIN_JWT_SECRET_LENGTH = 32;
+
+// Solo para desarrollo y tests: en producción JWT_SECRET es obligatoria.
+const DEV_JWT_SECRET = 'snap-dev-secret-no-usar-en-produccion';
 
 export class ConfigError extends Error {
   constructor(problems: string[]) {
@@ -52,6 +59,12 @@ export function loadConfig(env: Env = process.env): Config {
     problems.push(`PORT="${rawPort}" debe ser un entero entre 1 y 65535`);
   }
 
+  // El valor nunca se incluye en el mensaje: es un secreto.
+  const jwtSecret = read(env, 'JWT_SECRET');
+  if (jwtSecret !== undefined && jwtSecret.length < MIN_JWT_SECRET_LENGTH) {
+    problems.push(`JWT_SECRET debe tener al menos ${MIN_JWT_SECRET_LENGTH} caracteres`);
+  }
+
   if (problems.length > 0) {
     throw new ConfigError(problems);
   }
@@ -61,6 +74,7 @@ export function loadConfig(env: Env = process.env): Config {
     isProduction,
     port,
     dbName: read(env, 'DB_NAME') ?? 'snap.db',
+    jwtSecret: jwtSecret ?? DEV_JWT_SECRET,
   });
 }
 
