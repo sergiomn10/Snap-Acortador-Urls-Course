@@ -170,6 +170,114 @@ describe('módulo urls', () => {
     });
   });
 
+  describe('POST /urls con alias', () => {
+    it('usa el alias como código y redirige con él', async () => {
+      const res = await shorten({ url: 'https://example.com/promo', alias: 'Black_Friday-26' });
+
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as ShortUrlBody;
+      expect(body.code).toBe('Black_Friday-26');
+      expect(body.shortUrl).toBe(`${server.baseUrl}/Black_Friday-26`);
+      const redirect = await fetch(body.shortUrl, { redirect: 'manual' });
+      expect(redirect.headers.get('location')).toBe('https://example.com/promo');
+    });
+
+    it('responde 409 si el alias ya está en uso, también por otro usuario', async () => {
+      await shorten({ url: 'https://example.com/ana', alias: 'ocupado' }, ana);
+
+      const res = await shorten({ url: 'https://example.com/bea', alias: 'ocupado' }, bea);
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'Conflict', message: 'El alias "ocupado" ya está en uso' });
+      const redirect = await fetch(`${server.baseUrl}/ocupado`, { redirect: 'manual' });
+      expect(redirect.headers.get('location')).toBe('https://example.com/ana');
+    });
+
+    it.each([
+      ['demasiado corto', 'ab'],
+      ['demasiado largo', 'a'.repeat(33)],
+      ['con espacios', 'mi promo'],
+      ['con barra', 'mi/promo'],
+      ['con caracteres no ASCII', 'promoción'],
+      ['vacío', ''],
+      ['no string', 123],
+      ['null', null],
+    ])('responde 400 con un alias %s', async (_caso, alias) => {
+      const res = await shorten({ url: 'https://example.com', alias });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'Bad Request',
+        message: 'El campo "alias" debe tener entre 3 y 32 caracteres: letras, números, "-" o "_"',
+      });
+    });
+
+    it.each(['health', 'Dashboard', 'AUTH', 'urls'])(
+      'responde 400 con el alias reservado %s (lo taparía una ruta de la API)',
+      async (alias) => {
+        const res = await shorten({ url: 'https://example.com', alias });
+
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: 'Bad Request', message: `El alias "${alias}" está reservado` });
+      },
+    );
+
+    it('valida la URL antes que el alias', async () => {
+      const res = await shorten({ url: 'no es una url', alias: 'x' });
+
+      expect(((await res.json()) as { message: string }).message).toBe(
+        'El campo "url" debe ser una URL http(s) válida',
+      );
+    });
+  });
+
+  describe('GET /urls/mine', () => {
+    let carla: Session;
+
+    beforeAll(async () => {
+      carla = await register('carla@example.com');
+    });
+
+    function mine(session: Session | null): Promise<Response> {
+      return fetch(`${server.baseUrl}/urls/mine`, {
+        headers: session ? { authorization: `Bearer ${session.token}` } : {},
+      });
+    }
+
+    it('devuelve solo las URLs del usuario, la más reciente primero, con estadísticas y shortUrl', async () => {
+      const first = await createUrl('https://example.com/carla/1', carla);
+      await createUrl('https://example.com/no-es-de-carla', bea);
+      const second = await createUrl('https://example.com/carla/2', carla);
+      await fetch(first.shortUrl, { redirect: 'manual' });
+      await fetch(first.shortUrl, { redirect: 'manual' });
+
+      const res = await mine(carla);
+
+      expect(res.status).toBe(200);
+      const list = (await res.json()) as Array<ShortUrlBody & { clickCount: number; lastClickAt: string | null }>;
+      expect(list).toEqual([
+        { ...second, clickCount: 0, lastClickAt: null },
+        { ...first, clickCount: 2, lastClickAt: expect.any(String) },
+      ]);
+    });
+
+    it('devuelve una lista vacía a un usuario sin URLs', async () => {
+      const nuevo = await register('sin-urls@example.com');
+
+      const res = await mine(nuevo);
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([]);
+    });
+
+    it('responde 401 sin token', async () => {
+      const res = await mine(null);
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toBe('Bearer');
+    });
+  });
+
   describe('DELETE /urls/:code', () => {
     it('el creador puede borrar su URL: 204 y deja de redirigir', async () => {
       const { code } = await createUrl('https://example.com/borrar');
@@ -292,7 +400,7 @@ describe('módulo urls', () => {
         createdAt: created.createdAt,
         userId: bea.userId,
       });
-      expect(new Set(list.map((u) => u.userId))).toEqual(new Set([ana.userId, bea.userId, null]));
+      expect(list.map((u) => u.userId)).toEqual(expect.arrayContaining([ana.userId, bea.userId, null]));
     });
   });
 });

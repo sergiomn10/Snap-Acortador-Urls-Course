@@ -6,9 +6,14 @@
 
 Acortador de URLs con analíticas, construido con **Node.js**, **Express 5**, **TypeScript** y **SQLite**.
 
-Snap recibe una URL larga, genera un código corto aleatorio y redirige a la URL original cuando alguien visita ese código. Los usuarios se registran, inician sesión con un JWT, gestionan sus propias URLs y consultan un dashboard con los clicks que reciben.
+Snap recibe una URL larga, genera un código corto aleatorio (o usa el alias que elija el usuario) y redirige a la URL original cuando alguien visita ese código. Los usuarios se registran, inician sesión con un JWT, gestionan sus propias URLs y consultan un dashboard con los clicks que reciben.
 
-> **Estado:** en desarrollo. La autenticación, el acortado, el borrado, la redirección, el listado, el registro de clicks y el dashboard (totales y tendencias) ya funcionan. Los rankings del dashboard están pendientes.
+El repositorio contiene la API (`src/`) y una [interfaz web](#interfaz-web) en React (`web/`).
+
+> **Estado:** en desarrollo.
+>
+> - **API:** ya funcionan la autenticación, el acortado con alias opcional, el borrado, la redirección, el listado, el registro de clicks y el dashboard (totales y tendencias). Los rankings del dashboard están pendientes.
+> - **Interfaz web:** ya funcionan el login, el registro y el dashboard (crear URLs y ver sus estadísticas). Faltan borrar URLs y la gráfica diaria, y el despliegue en producción está pendiente de CORS.
 
 ---
 
@@ -20,6 +25,7 @@ Snap recibe una URL larga, genera un código corto aleatorio y redirige a la URL
 - [Configuración](#configuración)
 - [Autenticación](#autenticación)
 - [API](#api)
+- [Interfaz web](#interfaz-web)
 - [Arquitectura](#arquitectura)
 - [Base de datos](#base-de-datos)
 - [Tests](#tests)
@@ -34,6 +40,7 @@ Snap recibe una URL larga, genera un código corto aleatorio y redirige a la URL
 
 - **Códigos cortos impredecibles:** 7 caracteres base62 generados con `crypto.randomInt`. Hay unos 3,5 billones de combinaciones.
 - **Colisiones controladas:** si un código ya existe, se reintenta con otro.
+- **Alias opcionales:** el usuario puede elegir el código (`/black-friday`). Si ya está en uso, la API responde `409` en lugar de generar otro.
 - **Validación de entrada:** solo se aceptan URLs `http` o `https` de hasta 2048 caracteres. Así se evita redirigir a `javascript:`, `data:`, `file:`, etc.
 - **Redirección 302:** la respuesta no queda cacheada en el navegador, de modo que cada visita llega al servidor. Esto es necesario para las analíticas.
 - **Propiedad:** cada URL pertenece a quien la crea, y solo esa persona puede borrarla.
@@ -83,6 +90,7 @@ En desarrollo no hace falta configurar nada: `JWT_SECRET` y `VISITOR_HASH_SECRET
 | Script | Descripción |
 |---|---|
 | `npm run dev` | Arranca en modo desarrollo con recarga automática (`node --watch`). |
+| `npm run dev:web` | Arranca la [interfaz web](#interfaz-web) en `http://localhost:5173`. Necesita haber hecho antes `npm --prefix web install`. |
 | `npm run build` | Compila a JavaScript en `dist/`. Excluye los tests. |
 | `npm start` | Ejecuta la versión compilada (`dist/server.js`). |
 | `npm run typecheck` | Comprueba los tipos sin generar salida. |
@@ -153,6 +161,7 @@ El JWT está firmado con HS256 y contiene:
 | `POST /urls` | 🔒 Token |
 | `DELETE /urls/:code` | 🔒 Token, y solo el creador de la URL |
 | `GET /urls` | Público |
+| `GET /urls/mine` | 🔒 Token. Solo las URLs del usuario autenticado |
 | `GET /dashboard` | 🔒 Token. Solo incluye las URLs del usuario autenticado |
 | `GET /:code` | Público |
 | `GET /health` | Público |
@@ -229,10 +238,22 @@ curl -X POST http://localhost:3000/urls \
 }
 ```
 
+Opcionalmente se puede elegir el código con `alias`:
+
+```bash
+curl -X POST http://localhost:3000/urls \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $TOKEN" \
+  -d '{"url": "https://example.com/rebajas", "alias": "black-friday"}'
+```
+
+El alias debe tener entre 3 y 32 caracteres: letras, números, `-` o `_`. Distingue mayúsculas de minúsculas, igual que los códigos generados. `auth`, `dashboard`, `health` y `urls` están reservados, en cualquier combinación de mayúsculas, porque esas rutas de la API se resuelven antes que `GET /:code`.
+
 | Status | Cuándo |
 |---|---|
-| `400` | `url` ausente, no es un string, no es una URL válida, no usa `http`/`https` o supera los 2048 caracteres. |
+| `400` | `url` ausente, no es un string, no es una URL válida, no usa `http`/`https` o supera los 2048 caracteres. `alias` con formato inválido o reservado. |
 | `401` | Sin token, token inválido o expirado, o el usuario del token ya no existe. |
+| `409` | El `alias` ya lo usa otra URL, sea de quien sea. |
 
 ### `DELETE /urls/:code`: borrar una URL 🔒
 
@@ -262,6 +283,35 @@ Devuelve todas las URLs de todos los usuarios, de la más reciente a la más ant
   }
 ]
 ```
+
+### `GET /urls/mine`: listar mis URLs con estadísticas 🔒
+
+```bash
+curl http://localhost:3000/urls/mine \
+  -H "authorization: Bearer $TOKEN"
+```
+
+Devuelve solo las URLs del usuario autenticado, de la más reciente a la más antigua. Un usuario sin URLs recibe `[]`.
+
+```json
+[
+  {
+    "code": "jPOgMYB",
+    "url": "https://example.com/una/ruta/muy/larga",
+    "createdAt": "2026-11-04T09:16:40.512Z",
+    "userId": 1,
+    "clickCount": 42,
+    "lastClickAt": "2026-11-05T07:30:11.336Z",
+    "shortUrl": "http://localhost:3000/jPOgMYB"
+  }
+]
+```
+
+`clickCount` es el histórico de clics sin contar bots. `lastClickAt` es `null` si la URL nunca ha recibido un clic.
+
+| Status | Cuándo |
+|---|---|
+| `401` | Sin token, o token inválido o expirado. |
 
 ### `GET /dashboard`: vista general de mis URLs 🔒
 
@@ -321,8 +371,94 @@ Los clicks de bots no cuentan en ningún campo. Un usuario sin URLs recibe todo 
 | `401` | `Unauthorized` | Falta autenticación, o el token o las credenciales no son válidos. |
 | `403` | `Forbidden` | Autenticado, pero sin permiso sobre ese recurso. |
 | `404` | `Not Found` | Ruta o código inexistente. |
-| `409` | `Conflict` | Email ya registrado. |
+| `409` | `Conflict` | Email ya registrado, o alias ya en uso. |
 | `500` | `Internal Server Error` | Error inesperado. El mensaje solo se incluye fuera de producción. |
+
+## Interfaz web
+
+SPA en `web/`, con **React**, **React Router**, **TanStack Query** y **Vite**. Es un proyecto aparte, con su propio `package.json`: no comparte dependencias, `tsconfig` ni tests con la API.
+
+### Arrancarla
+
+```bash
+npm --prefix web install   # solo la primera vez
+
+npm run dev                # terminal 1: API en http://localhost:3000
+npm run dev:web            # terminal 2: interfaz en http://localhost:5173
+```
+
+Abre `http://localhost:5173`. Sin sesión, la interfaz redirige a `/login`.
+
+### Cómo habla con la API
+
+El cliente pide todo con el prefijo `/api` (`/api/auth/login`, `/api/urls/mine`…). En desarrollo, el proxy de Vite ([`web/vite.config.ts`](web/vite.config.ts)) quita ese prefijo y reenvía a `http://localhost:3000`. Esto tiene dos ventajas:
+
+- **No hace falta CORS:** para el navegador todo está en el mismo origen.
+- **Las rutas no chocan:** `/dashboard` es la página del SPA y `/api/dashboard` es el endpoint, aunque en la API los dos sean `/dashboard`.
+
+El proxy envía la cabecera `Host` de la API (`changeOrigin`), así que los `shortUrl` apuntan a `http://localhost:3000/<código>`, que es donde se redirige.
+
+| Variable | Por defecto | Descripción |
+|---|---|---|
+| `VITE_API_URL` | `/api` | URL base de la API. Se fija al compilar (`web/.env`, ver [`web/.env.example`](web/.env.example)). |
+
+### Páginas
+
+| Ruta | Acceso | Endpoints | Qué hace |
+|---|---|---|---|
+| `/login` | Pública | `POST /auth/login` | Inicia sesión. Si se llegó desde una ruta protegida, vuelve a ella (`?next=`). |
+| `/register` | Pública | `POST /auth/register` | Crea la cuenta e inicia sesión. |
+| `/dashboard` | 🔒 Sesión | `GET /urls/mine`, `GET /dashboard`, `POST /urls` | Crear URLs (con alias opcional), resumen del periodo (`?days=7\|30\|90`) y tabla de URLs con sus clics. |
+
+Con sesión, `/login` y `/register` redirigen al dashboard.
+
+### Sesión
+
+- El token y el usuario se guardan en `localStorage` (`snap.session`) junto con el `exp` del JWT. El cliente solo decodifica el token: la firma la verifica la API.
+- La sesión se cierra sola al caducar el token (24 h), si cualquier petición recibe un `401` (el login lo avisa con "Tu sesión ha caducado") y en todas las pestañas a la vez.
+- Al cerrar sesión se vacía la caché de TanStack Query, para que no queden a la vista datos del usuario anterior.
+- Los formularios validan con las mismas reglas que la API ([`web/src/auth/validation.ts`](web/src/auth/validation.ts), [`web/src/urls/validation.ts`](web/src/urls/validation.ts)) para avisar sin esperar al servidor. La validación que cuenta sigue siendo la de la API: si cambias una regla allí, cámbiala también aquí.
+- Los tipos de las respuestas están copiados a mano en [`web/src/api/types.ts`](web/src/api/types.ts). Si cambia la forma de una respuesta de la API, hay que actualizarlos.
+
+### Estructura
+
+```
+web/src/
+├── main.tsx            # Providers: TanStack Query → AuthProvider → router
+├── routes.tsx          # Rutas y guards
+├── api/                # Cliente HTTP (client.ts, ApiError), tipos y una función por endpoint
+├── auth/               # AuthContext (sesión, withToken), guards, JWT y validación de login/registro
+├── urls/               # Hooks de TanStack Query y validación del formulario de URLs
+├── dashboard/          # Componentes del dashboard: formulario, resumen, tabla, botón de copiar
+├── pages/              # Login, Register, Dashboard, 404
+├── components/         # FormField y Banner, compartidos
+└── lib/format.ts       # Números, fechas y tiempos relativos con Intl ('es')
+```
+
+### Scripts
+
+Todos se ejecutan dentro de `web/` (o con `npm --prefix web run <script>`).
+
+| Script | Descripción |
+|---|---|
+| `npm run dev` | Servidor de desarrollo con el proxy a la API. |
+| `npm run build` | Comprueba los tipos y compila a `web/dist/`. |
+| `npm run typecheck` | Comprueba los tipos. |
+| `npm test` | Tests con Vitest + Testing Library en jsdom. |
+
+Los tests montan la aplicación completa con un router en memoria y simulan la API con un `fetch` falso ([`web/src/test/utils.tsx`](web/src/test/utils.tsx)), sin necesidad de levantar el backend.
+
+> Node 25 trae su propio `localStorage` global, que tapa el de jsdom y no funciona sin `--localstorage-file`. [`web/src/test/setup.ts`](web/src/test/setup.ts) lo sustituye por uno en memoria. En el navegador no ocurre.
+
+### Producción (pendiente)
+
+`npm run build` genera estáticos en `web/dist/`, pero **todavía no hay un despliegue que funcione**:
+
+- La interfaz y la API tienen que estar en orígenes distintos, porque `/:code` ocupa todas las rutas de un segmento de la API. Eso exige **CORS**, que la API aún no tiene.
+- Para desplegarla hará falta:
+  1. añadir a la API un middleware CORS con una lista de orígenes permitidos;
+  2. compilar con `VITE_API_URL=https://<dominio de la API>`;
+  3. servir `web/dist/` con un fallback a `index.html` para las rutas del SPA.
 
 ## Arquitectura
 
@@ -346,7 +482,7 @@ src/
 │   │   └── auth.routes.ts       # Validación HTTP, /auth/register y /auth/login
 │   ├── urls/
 │   │   ├── urls.repository.ts   # Acceso a datos y generación de códigos
-│   │   └── urls.routes.ts       # Validación HTTP, /urls y /:code
+│   │   └── urls.routes.ts       # Validación HTTP (URL y alias), /urls, /urls/mine y /:code
 │   ├── analytics/
 │   │   ├── click-info.ts        # Dispositivo, host del referer y hash del visitante
 │   │   ├── clicks.repository.ts # Inserción de clicks
@@ -379,7 +515,7 @@ src/
 request-logger → express.json() → /health → /auth → /urls → /dashboard → /:code → notFoundHandler → errorHandler
 ```
 
-`GET /:code` captura cualquier ruta de un solo segmento, así que **cualquier router nuevo debe montarse antes que él**.
+`GET /:code` captura cualquier ruta de un solo segmento, así que **cualquier router nuevo debe montarse antes que él**. Por eso los nombres de esos routers (`auth`, `dashboard`, `health`, `urls`) están en `RESERVED_ALIASES` ([`urls.routes.ts`](src/modules/urls/urls.routes.ts)): un alias con ese nombre nunca llegaría a redirigir.
 
 ## Base de datos
 
@@ -438,14 +574,14 @@ CREATE INDEX urls_user_id ON urls (user_id);
 | Columna | Descripción |
 |---|---|
 | `id` | Identificador interno. |
-| `code` | Código corto público (7 caracteres base62). Único. |
+| `code` | Código corto público: 7 caracteres base62 generados, o el alias elegido (3–32 caracteres). Único y distingue mayúsculas de minúsculas. |
 | `original_url` | URL de destino, ya validada y normalizada. |
 | `created_at` | Fecha de creación. |
 | `user_id` | Usuario que la creó. `NULL` en las URLs anteriores a la autenticación. |
 | `click_count` | Clicks recibidos, sin contar bots. Lo mantiene el trigger `clicks_count_url`. |
 | `last_click_at` | Fecha del click más reciente, sin contar bots. `NULL` si no hay ninguno. |
 
-`click_count` y `last_click_at` están desnormalizados a propósito: así los totales del dashboard leen una fila por URL en vez de recorrer todo el histórico de clicks. No se devuelven en `GET /urls`.
+`click_count` y `last_click_at` están desnormalizados a propósito: así los totales del dashboard leen una fila por URL en vez de recorrer todo el histórico de clicks. No se devuelven en `GET /urls`, pero sí en `GET /urls/mine`, como `clickCount` y `lastClickAt`.
 
 ### `clicks`
 
@@ -503,8 +639,11 @@ Los archivos `*.db` están en `.gitignore`.
 ## Tests
 
 ```bash
-npm test
+npm test                  # API
+npm --prefix web test     # interfaz web (ver Interfaz web → Scripts)
 ```
+
+`npm test` en la raíz solo ejecuta los tests de la API (`src/`). Esta sección describe esos tests; los de la interfaz se describen en [Interfaz web](#interfaz-web).
 
 Se usa [Vitest](https://vitest.dev/). Los tests están junto al código que prueban (`*.test.ts`) y son de dos tipos:
 
@@ -546,4 +685,5 @@ Para un módulo hipotético `foo`:
    ```ts
    app.use('/foo', createFooRouter(createFooRepository(db), requireAuth));
    ```
-6. Añadir los tests (`foo.repository.test.ts`, `foo.test.ts`…) y ejecutar `npm test`.
+6. Añadir `'foo'` a `RESERVED_ALIASES` en [`urls.routes.ts`](src/modules/urls/urls.routes.ts), y también en [`web/src/urls/validation.ts`](web/src/urls/validation.ts) para que el formulario lo avise antes de enviar. Si ya existe una URL con el alias `foo`, dejará de redirigir: hay que revisarlo en la base antes de desplegar.
+7. Añadir los tests (`foo.repository.test.ts`, `foo.test.ts`…) y ejecutar `npm test`.

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase } from '../../db/database.ts';
 import { createUsersRepository } from '../auth/auth.repository.ts';
 import {
+  AliasTakenError,
   CODE_LENGTH,
   createUrlsRepository,
   generateCode,
@@ -83,6 +84,65 @@ describe('createUrlsRepository', () => {
 
     expect(() => repository.create('https://example.com/', 999)).toThrow(UnknownUserError);
     expect(repository.list()).toEqual([]);
+  });
+
+  describe('create con alias', () => {
+    it('usa el alias como código', () => {
+      const repository = createUrlsRepository(db);
+
+      const created = repository.create('https://example.com/', userId, 'mi-promo');
+
+      expect(created.code).toBe('mi-promo');
+      expect(repository.findByCode('mi-promo')).toEqual(created);
+    });
+
+    it('lanza AliasTakenError si el alias ya existe, sin reintentar con otro código', () => {
+      const repository = createUrlsRepository(db);
+      repository.create('https://example.com/1', userId, 'mi-promo');
+
+      expect(() => repository.create('https://example.com/2', userId, 'mi-promo')).toThrow(AliasTakenError);
+      expect(repository.findByCode('mi-promo')?.url).toBe('https://example.com/1');
+      expect(repository.list()).toHaveLength(1);
+    });
+
+    it('choca también con un código generado', () => {
+      const repository = createUrlsRepository(db, () => 'aaaaaaa');
+      repository.create('https://example.com/1', userId);
+
+      expect(() => repository.create('https://example.com/2', userId, 'aaaaaaa')).toThrow(AliasTakenError);
+    });
+
+    it('lanza UnknownUserError antes que AliasTakenError si el usuario no existe', () => {
+      expect(() => createUrlsRepository(db).create('https://example.com/', 999, 'mi-promo')).toThrow(
+        UnknownUserError,
+      );
+    });
+  });
+
+  describe('listByUser', () => {
+    it('devuelve solo las URLs del usuario, de la más reciente a la más antigua, con sus contadores', () => {
+      const repository = createUrlsRepository(db);
+      const otherId = createUsersRepository(db).create({
+        email: 'bea@example.com',
+        passwordHash: 'hash',
+        name: 'Bea',
+      })!.id;
+      const first = repository.create('https://example.com/1', userId);
+      repository.create('https://example.com/bea', otherId);
+      const second = repository.create('https://example.com/2', userId);
+      db.prepare("UPDATE urls SET click_count = 3, last_click_at = '2026-11-05T10:00:00.000Z' WHERE code = ?").run(
+        first.code,
+      );
+
+      expect(repository.listByUser(userId)).toEqual([
+        { ...second, clickCount: 0, lastClickAt: null },
+        { ...first, clickCount: 3, lastClickAt: '2026-11-05T10:00:00.000Z' },
+      ]);
+    });
+
+    it('devuelve una lista vacía si el usuario no tiene URLs', () => {
+      expect(createUrlsRepository(db).listByUser(userId)).toEqual([]);
+    });
   });
 
   describe('remove', () => {

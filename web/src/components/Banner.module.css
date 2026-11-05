@@ -1,0 +1,29 @@
+.banner {
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.banner a {
+  color: inherit;
+  font-weight: 600;
+}
+
+.error {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.info {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.success {
+  border-color: var(--success);
+  background: var(--success-soft);
+  color: var(--text);
+}
